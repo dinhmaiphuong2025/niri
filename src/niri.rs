@@ -4501,9 +4501,17 @@ impl Niri {
         // be possible.
 
         let mut buffer = xray.background[ctx.target as usize].borrow_mut();
+        buffer.elements().clear();
+
+        let mut backdrop_buffer = xray.backdrop[ctx.target as usize].borrow_mut();
+        backdrop_buffer.elements().clear();
+
+        if layer_map.layers_on(Layer::Background).count() == 0 {
+            return;
+        }
+
         {
             let elements = buffer.elements();
-            elements.clear();
             self.render_layer_normal(
                 ctx.r(),
                 None,
@@ -4517,10 +4525,8 @@ impl Niri {
             elements.shrink_to_fit();
         }
 
-        let mut buffer = xray.backdrop[ctx.target as usize].borrow_mut();
         {
-            let elements = buffer.elements();
-            elements.clear();
+            let elements = backdrop_buffer.elements();
             self.render_layer_normal(
                 ctx.r(),
                 None,

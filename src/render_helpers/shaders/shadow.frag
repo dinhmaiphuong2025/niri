@@ -60,11 +60,11 @@ float roundedBoxShadow(vec2 lower, vec2 upper, vec2 point, float sigma, float co
   float start = clamp(-4.5 * sigma, low, high);
   float end = clamp(4.5 * sigma, low, high);
 
-  // Accumulate samples with 4 steps for optimal GPU fill-rate on mobile TBDR
-  float step = (end - start) / 4.0;
+  // Accumulate samples with 8 steps for smooth, full desktop-grade Gaussian shadows
+  float step = (end - start) / 8.0;
   float y = start + step * 0.5;
   float value = 0.0;
-  for (int i = 0; i < 4; i++) {
+  for (int i = 0; i < 8; i++) {
     value += roundedBoxShadowX(point.x, point.y - y, sigma, corner, halfSize) * gaussian(y, sigma) * step;
     y += step;
   }
@@ -78,13 +78,13 @@ void main() {
     vec3 coords_geo = input_to_geo * vec3(niri_v_coords, 1.0);
     vec3 coords_window_geo = window_input_to_geo * vec3(niri_v_coords, 1.0);
 
-    // Fast-bounding discard: if the fragment is further than 4.5 * sigma away
-    // from the shadow rectangle, the gaussian weight is strictly below 0.0001
-    // (invisible). Discarding early skips the entire 8-step integration loop.
+    // Fast-bounding check: if the fragment is further than 4.5 * sigma away,
+    // write transparent output without discard to preserve Adreno Early-LRZ tile binning.
     if (sigma >= 0.1) {
         vec2 d = max(-coords_geo.xy, coords_geo.xy - geo_size);
         if (max(d.x, d.y) > 4.5 * sigma) {
-            discard;
+            gl_FragColor = vec4(0.0);
+            return;
         }
     }
 
@@ -109,7 +109,8 @@ void main() {
     }
 
     if (shadow_value <= 0.0005) {
-        discard;
+        gl_FragColor = vec4(0.0);
+        return;
     }
 
     color = color * shadow_value;
@@ -126,7 +127,8 @@ void main() {
     color = color * niri_alpha;
 
     if (color.a <= 0.0005) {
-        discard;
+        gl_FragColor = vec4(0.0);
+        return;
     }
 
 #if defined(DEBUG_FLAGS)

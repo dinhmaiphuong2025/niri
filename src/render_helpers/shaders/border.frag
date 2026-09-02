@@ -214,7 +214,8 @@ void main() {
     vec3 coords_geo = input_to_geo * vec3(niri_v_coords, 1.0);
     float rounding_alpha = niri_rounding_alpha(coords_geo.xy, geo_size, outer_radius);
     if (rounding_alpha <= 0.0005) {
-        discard;
+        gl_FragColor = vec4(0.0);
+        return;
     }
 
     vec4 color = gradient_color(coords_geo.xy);
@@ -235,7 +236,8 @@ void main() {
     color = color * niri_alpha;
 
     if (color.a <= 0.0005) {
-        discard;
+        gl_FragColor = vec4(0.0);
+        return;
     }
 
 #if defined(DEBUG_FLAGS)

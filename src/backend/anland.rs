@@ -264,6 +264,11 @@ pub struct Anland {
     // Frame timing for debugging
     frame_times: std::collections::VecDeque<u64>,
 
+    // Diagnostic: timestamp of last send_frame_callbacks call (Stage 1 logging)
+    last_callback_time: Option<Instant>,
+    // Diagnostic: timestamp of last successful render (for heartbeat idle check)
+    last_render_time: Option<Instant>,
+
     reconnect_timer_token: Option<RegistrationToken>,
     buf_ready_source_token: Option<RegistrationToken>,
     data_source_token: Option<RegistrationToken>,
@@ -319,6 +324,8 @@ impl Anland {
             frame_count: 0,
             last_frame_per_buffer: Vec::new(),
             frame_times: std::collections::VecDeque::new(),
+            last_callback_time: None,
+            last_render_time: None,
         })
     }
 
@@ -665,6 +672,12 @@ impl Anland {
         let timer = Timer::from_duration(Duration::from_millis(4000));
         if let Ok(token) = niri.event_loop.insert_source(timer, move |_, _, state| {
             let anland = state.backend.anland();
+            // GĐ1 diagnostic: log heartbeat fire + idle duration since last render.
+            let idle_ms = anland
+                .last_render_time
+                .map(|t| Instant::now().duration_since(t).as_millis() as u64)
+                .unwrap_or(0);
+            tracing::info!("gđ1 heartbeat_fire idle_ms={} frame_seq={}", idle_ms, anland.frame_count);
             // Consumer timeout is 5s. If we hit 4s without a render, force a full clean repaint.
             anland.full_damage_frames_remaining = anland.dmabufs.len().max(4);
             if let Some(output) = anland.output.clone() {
@@ -1103,6 +1116,19 @@ impl Anland {
 
         // Deliver frame callbacks (wl_surface_frame / wl_callback.done) to Noctalia and
         // other Wayland clients now so they can begin preparing the next frame immediately.
+        // GĐ1 diagnostic: log delta since last callback to detect pipelining issues.
+        let now = Instant::now();
+        let cb_delta_ms = self
+            .last_callback_time
+            .map(|t| now.duration_since(t).as_millis() as u64)
+            .unwrap_or(0);
+        tracing::info!(
+            "gđ1 frame_seq={} cb_seq={} cb_delta_ms={}",
+            self.frame_count,
+            output_state.frame_callback_sequence,
+            cb_delta_ms
+        );
+        self.last_callback_time = Some(now);
         niri.send_frame_callbacks(output);
 
         let frame_time_ms = frame_start.elapsed().as_millis() as u64;
@@ -1143,6 +1169,20 @@ impl Anland {
 
         // Reset the heartbeat timer since we actually rendered a frame
         self.register_heartbeat_timer(niri);
+
+        // GĐ1 diagnostic: log render->trigger_refresh delta to detect pipelining issues.
+        let render_delta_ms = self
+            .last_render_time
+            .map(|t| frame_start.duration_since(t).as_millis() as u64)
+            .unwrap_or(0);
+        tracing::info!(
+            "gđ1 trigger_refresh frame_seq={} idx={} render_delta_ms={} frame_time_ms={}",
+            self.frame_count,
+            idx,
+            render_delta_ms,
+            frame_time_ms
+        );
+        self.last_render_time = Some(Instant::now());
 
         // Signal the consumer ONLY when we actually rendered something.
         self.ctx.trigger_refresh();

@@ -273,6 +273,10 @@ pub struct Anland {
     buf_ready_source_token: Option<RegistrationToken>,
     data_source_token: Option<RegistrationToken>,
     heartbeat_timer_token: Option<RegistrationToken>,
+    // GĐ2: timer for deferred frame callback after SurfaceFlinger scanout.
+    deferred_callback_token: Option<RegistrationToken>,
+    // GĐ2: how long to wait before sending frame callback (allow SurfaceFlinger scanout).
+    deferred_callback_delay: Duration,
     full_damage_frames_remaining: usize,
 
     ipc_outputs: Arc<Mutex<IpcOutputMap>>,
@@ -317,6 +321,8 @@ impl Anland {
             buf_ready_source_token: None,
             data_source_token: None,
             heartbeat_timer_token: None,
+            deferred_callback_token: None,
+            deferred_callback_delay: Duration::from_millis(8),
             full_damage_frames_remaining: 0,
             ipc_outputs: Arc::new(Mutex::new(HashMap::new())),
             pending_clipboard: None,
@@ -686,6 +692,44 @@ impl Anland {
             TimeoutAction::ToDuration(Duration::from_millis(4000))
         }) {
             self.heartbeat_timer_token = Some(token);
+        }
+    }
+
+    // GĐ2: schedule a deferred send_frame_callbacks after SurfaceFlinger
+    // scanout. Replaces the previous immediate call. If a previous timer is
+    // still pending, drop it (the new render supersedes).
+    fn schedule_deferred_callback(
+        &mut self,
+        niri: &mut Niri,
+        output: &Output,
+        _cb_sequence: u64,
+    ) {
+        if let Some(token) = self.deferred_callback_token.take() {
+            let _ = niri.event_loop.remove(token);
+        }
+        let delay = self.deferred_callback_delay;
+        let timer = Timer::from_duration(delay);
+        match niri.event_loop.insert_source(timer, move |_maybe_earlier, _metadata, state| {
+            let anland = state.backend.anland();
+            anland.deferred_callback_token = None;
+            if let Some(output) = anland.output.as_ref() {
+                tracing::info!(
+                    "gđ2 deferred_callback_fire frame_seq={} delay_ms={}",
+                    anland.frame_count,
+                    delay.as_millis() as u64,
+                );
+                state.niri.send_frame_callbacks(output);
+            }
+            TimeoutAction::Drop
+        }) {
+            Ok(token) => {
+                self.deferred_callback_token = Some(token);
+            }
+            Err(e) => {
+                tracing::warn!("gđ2 failed to register deferred callback timer: {e:?}");
+                // Fallback: send immediately to avoid starving clients.
+                niri.send_frame_callbacks(output);
+            }
         }
     }
 
@@ -1122,14 +1166,20 @@ impl Anland {
             .last_callback_time
             .map(|t| now.duration_since(t).as_millis() as u64)
             .unwrap_or(0);
+        let pending_cb_sequence = output_state.frame_callback_sequence;
         tracing::info!(
             "gđ1 frame_seq={} cb_seq={} cb_delta_ms={}",
             self.frame_count,
-            output_state.frame_callback_sequence,
+            pending_cb_sequence,
             cb_delta_ms
         );
         self.last_callback_time = Some(now);
-        niri.send_frame_callbacks(output);
+        // GĐ2: defer send_frame_callbacks to allow SurfaceFlinger to scanout the
+        // buffer first. Without this, shell clients (noctalia) receive
+        // wl_callback.done immediately and may submit the next frame before
+        // SurfaceFlinger has consumed the current one, causing judder and
+        // tearing during tab switches.
+        self.schedule_deferred_callback(niri, output, pending_cb_sequence);
 
         let frame_time_ms = frame_start.elapsed().as_millis() as u64;
         self.frame_times.push_back(frame_time_ms);

@@ -322,7 +322,7 @@ impl Anland {
             data_source_token: None,
             heartbeat_timer_token: None,
             deferred_callback_token: None,
-            deferred_callback_delay: Duration::from_millis(8),
+            deferred_callback_delay: Duration::from_millis(12),
             full_damage_frames_remaining: 0,
             ipc_outputs: Arc::new(Mutex::new(HashMap::new())),
             pending_clipboard: None,

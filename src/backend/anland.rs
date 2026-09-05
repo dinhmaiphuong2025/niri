@@ -702,7 +702,7 @@ impl Anland {
         &mut self,
         niri: &mut Niri,
         output: &Output,
-        _cb_sequence: u64,
+        _cb_sequence: u32,
     ) {
         if let Some(token) = self.deferred_callback_token.take() {
             let _ = niri.event_loop.remove(token);

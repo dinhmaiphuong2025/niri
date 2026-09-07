@@ -312,8 +312,6 @@ impl Anland {
             buf_ready_source_token: None,
             data_source_token: None,
             heartbeat_timer_token: None,
-            deferred_callback_token: None,
-            deferred_callback_delay: Duration::from_millis(12),
             full_damage_frames_remaining: 0,
             ipc_outputs: Arc::new(Mutex::new(HashMap::new())),
             pending_clipboard: None,
@@ -1189,7 +1187,7 @@ fn protocol_format_to_fourcc(format: u32) -> Fourcc {
     match format {
         // Consumer-side format 1 == Android RGBA_8888 (AHARDWAREBUFFER
         // R8G8B8A8_UNORM): byte order R,G,B,A in memory == DRM ABGR8888.
-        0x01 | 1 => Fourcc::Abgr8888,
+        0x01 => Fourcc::Abgr8888,
         0x34325241 | 0x41425234 | 0x08 => Fourcc::Argb8888,
         0x34325258 | 0x58425234 | 0x0c | 0x02 => Fourcc::Xrgb8888,
         0x32335241 | 0x41425233 | 0x09 | 0x03 => Fourcc::Abgr8888,

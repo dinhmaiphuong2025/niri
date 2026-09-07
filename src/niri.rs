@@ -2268,6 +2268,10 @@ impl Niri {
         self.layout.is_in_overview()
     }
 
+    pub fn is_overview_animating(&self) -> bool {
+        self.layout.is_overview_animating()
+    }
+
     pub fn new(
         config: Rc<RefCell<Config>>,
         event_loop: LoopHandle<'static, State>,

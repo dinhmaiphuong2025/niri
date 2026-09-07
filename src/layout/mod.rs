@@ -5013,6 +5013,12 @@ impl<W: LayoutElement> Layout<W> {
     pub fn is_in_overview(&self) -> bool {
         self.overview_progress.is_some() || self.overview_open
     }
+
+    pub fn is_overview_animating(&self) -> bool {
+        self.overview_progress
+            .as_ref()
+            .is_some_and(|p| matches!(p, OverviewProgress::Animation(_) | OverviewProgress::Gesture(_)))
+    }
 }
 
 impl<W: LayoutElement> Default for MonitorSet<W> {

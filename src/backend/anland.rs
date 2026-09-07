@@ -269,6 +269,8 @@ pub struct Anland {
     data_source_token: Option<RegistrationToken>,
     heartbeat_timer_token: Option<RegistrationToken>,
     full_damage_frames_remaining: usize,
+    was_overview_animating: bool,
+    was_in_overview: bool,
 
     ipc_outputs: Arc<Mutex<IpcOutputMap>>,
 
@@ -313,6 +315,8 @@ impl Anland {
             data_source_token: None,
             heartbeat_timer_token: None,
             full_damage_frames_remaining: 0,
+            was_overview_animating: false,
+            was_in_overview: false,
             ipc_outputs: Arc::new(Mutex::new(HashMap::new())),
             pending_clipboard: None,
             pending_rotation: None,
@@ -481,6 +485,8 @@ impl Anland {
         self.dmabufs.clear();
         self.last_frame_per_buffer.clear();
         self.frame_count = 0;
+        self.was_overview_animating = false;
+        self.was_in_overview = false;
 
         // Dimensions of the buffers the consumer actually allocated this
         // session. They travel consumer->producer over the direct data
@@ -1024,6 +1030,23 @@ impl Anland {
         } else {
             0
         };
+
+        let is_overview_animating = niri.is_overview_animating();
+        let in_overview = niri.is_in_overview();
+
+        // While overview zoom is animating or being gestured, layout geometry
+        // changes on every frame — force full repaint (age = 0).
+        // When overview completes an open/close transition, trigger a clean sweep
+        // across all buffers in the swapchain pool so every DMABUF receives the
+        // new stationary layout before reverting to partial damage rendering.
+        if is_overview_animating {
+            age = 0;
+        } else if self.was_overview_animating || (self.was_in_overview != in_overview) {
+            self.full_damage_frames_remaining = self.dmabufs.len().max(4);
+        }
+
+        self.was_overview_animating = is_overview_animating;
+        self.was_in_overview = in_overview;
 
         if self.full_damage_frames_remaining > 0 {
             age = 0;

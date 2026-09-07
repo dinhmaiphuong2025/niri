@@ -264,19 +264,10 @@ pub struct Anland {
     // Frame timing for debugging
     frame_times: std::collections::VecDeque<u64>,
 
-    // Diagnostic: timestamp of last send_frame_callbacks call (Stage 1 logging)
-    last_callback_time: Option<Instant>,
-    // Diagnostic: timestamp of last successful render (for heartbeat idle check)
-    last_render_time: Option<Instant>,
-
     reconnect_timer_token: Option<RegistrationToken>,
     buf_ready_source_token: Option<RegistrationToken>,
     data_source_token: Option<RegistrationToken>,
     heartbeat_timer_token: Option<RegistrationToken>,
-    // GĐ2: timer for deferred frame callback after SurfaceFlinger scanout.
-    deferred_callback_token: Option<RegistrationToken>,
-    // GĐ2: how long to wait before sending frame callback (allow SurfaceFlinger scanout).
-    deferred_callback_delay: Duration,
     full_damage_frames_remaining: usize,
 
     ipc_outputs: Arc<Mutex<IpcOutputMap>>,
@@ -330,8 +321,6 @@ impl Anland {
             frame_count: 0,
             last_frame_per_buffer: Vec::new(),
             frame_times: std::collections::VecDeque::new(),
-            last_callback_time: None,
-            last_render_time: None,
         })
     }
 
@@ -678,12 +667,6 @@ impl Anland {
         let timer = Timer::from_duration(Duration::from_millis(4000));
         if let Ok(token) = niri.event_loop.insert_source(timer, move |_, _, state| {
             let anland = state.backend.anland();
-            // GĐ1 diagnostic: log heartbeat fire + idle duration since last render.
-            let idle_ms = anland
-                .last_render_time
-                .map(|t| Instant::now().duration_since(t).as_millis() as u64)
-                .unwrap_or(0);
-            tracing::info!("gđ1 heartbeat_fire idle_ms={} frame_seq={}", idle_ms, anland.frame_count);
             // Consumer timeout is 5s. If we hit 4s without a render, force a full clean repaint.
             anland.full_damage_frames_remaining = anland.dmabufs.len().max(4);
             if let Some(output) = anland.output.clone() {
@@ -692,44 +675,6 @@ impl Anland {
             TimeoutAction::ToDuration(Duration::from_millis(4000))
         }) {
             self.heartbeat_timer_token = Some(token);
-        }
-    }
-
-    // GĐ2: schedule a deferred send_frame_callbacks after SurfaceFlinger
-    // scanout. Replaces the previous immediate call. If a previous timer is
-    // still pending, drop it (the new render supersedes).
-    fn schedule_deferred_callback(
-        &mut self,
-        niri: &mut Niri,
-        output: &Output,
-        _cb_sequence: u32,
-    ) {
-        if let Some(token) = self.deferred_callback_token.take() {
-            let _ = niri.event_loop.remove(token);
-        }
-        let delay = self.deferred_callback_delay;
-        let timer = Timer::from_duration(delay);
-        match niri.event_loop.insert_source(timer, move |_maybe_earlier, _metadata, state| {
-            let anland = state.backend.anland();
-            anland.deferred_callback_token = None;
-            if let Some(output) = anland.output.as_ref() {
-                tracing::info!(
-                    "gđ2 deferred_callback_fire frame_seq={} delay_ms={}",
-                    anland.frame_count,
-                    delay.as_millis() as u64,
-                );
-                state.niri.send_frame_callbacks(output);
-            }
-            TimeoutAction::Drop
-        }) {
-            Ok(token) => {
-                self.deferred_callback_token = Some(token);
-            }
-            Err(e) => {
-                tracing::warn!("gđ2 failed to register deferred callback timer: {e:?}");
-                // Fallback: send immediately to avoid starving clients.
-                niri.send_frame_callbacks(output);
-            }
         }
     }
 
@@ -1160,26 +1105,7 @@ impl Anland {
 
         // Deliver frame callbacks (wl_surface_frame / wl_callback.done) to Noctalia and
         // other Wayland clients now so they can begin preparing the next frame immediately.
-        // GĐ1 diagnostic: log delta since last callback to detect pipelining issues.
-        let now = Instant::now();
-        let cb_delta_ms = self
-            .last_callback_time
-            .map(|t| now.duration_since(t).as_millis() as u64)
-            .unwrap_or(0);
-        let pending_cb_sequence = output_state.frame_callback_sequence;
-        tracing::info!(
-            "gđ1 frame_seq={} cb_seq={} cb_delta_ms={}",
-            self.frame_count,
-            pending_cb_sequence,
-            cb_delta_ms
-        );
-        self.last_callback_time = Some(now);
-        // GĐ2: defer send_frame_callbacks to allow SurfaceFlinger to scanout the
-        // buffer first. Without this, shell clients (noctalia) receive
-        // wl_callback.done immediately and may submit the next frame before
-        // SurfaceFlinger has consumed the current one, causing judder and
-        // tearing during tab switches.
-        self.schedule_deferred_callback(niri, output, pending_cb_sequence);
+        niri.send_frame_callbacks(output);
 
         let frame_time_ms = frame_start.elapsed().as_millis() as u64;
         self.frame_times.push_back(frame_time_ms);
@@ -1219,20 +1145,6 @@ impl Anland {
 
         // Reset the heartbeat timer since we actually rendered a frame
         self.register_heartbeat_timer(niri);
-
-        // GĐ1 diagnostic: log render->trigger_refresh delta to detect pipelining issues.
-        let render_delta_ms = self
-            .last_render_time
-            .map(|t| frame_start.duration_since(t).as_millis() as u64)
-            .unwrap_or(0);
-        tracing::info!(
-            "gđ1 trigger_refresh frame_seq={} idx={} render_delta_ms={} frame_time_ms={}",
-            self.frame_count,
-            idx,
-            render_delta_ms,
-            frame_time_ms
-        );
-        self.last_render_time = Some(Instant::now());
 
         // Signal the consumer ONLY when we actually rendered something.
         self.ctx.trigger_refresh();
@@ -1275,15 +1187,14 @@ impl Anland {
 
 fn protocol_format_to_fourcc(format: u32) -> Fourcc {
     match format {
-        0x34325241 | 0x41425234 | 0x08 => Fourcc::Argb8888,
         // Consumer-side format 1 == Android RGBA_8888 (AHARDWAREBUFFER
         // R8G8B8A8_UNORM): byte order R,G,B,A in memory == DRM ABGR8888.
-        // Importing it as ARGB8888 (B,G,R,A) rendered every pixel R<->B swapped.
-        0x01 => Fourcc::Abgr8888,
+        0x01 | 1 => Fourcc::Abgr8888,
+        0x34325241 | 0x41425234 | 0x08 => Fourcc::Argb8888,
         0x34325258 | 0x58425234 | 0x0c | 0x02 => Fourcc::Xrgb8888,
         0x32335241 | 0x41425233 | 0x09 | 0x03 => Fourcc::Abgr8888,
         0x32335258 | 0x58425233 | 0x0d | 0x04 => Fourcc::Xbgr8888,
-        _ => Fourcc::Argb8888,
+        _ => Fourcc::Abgr8888,
     }
 }
 

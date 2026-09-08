@@ -23,9 +23,10 @@ use smithay::reexports::calloop::{
     Result as CalloopResult, Token, TokenFactory,
 };
 use smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback;
+use smithay::desktop::utils::OutputPresentationFeedback;
 use smithay::utils::Size;
 use smithay::wayland::dmabuf::{DmabufFeedback, DmabufFeedbackBuilder, DmabufGlobal};
-use smithay::wayland::presentation::{OutputPresentationFeedback, Refresh};
+use smithay::wayland::presentation::Refresh;
 use smithay::wayland::selection::data_device::set_data_device_selection;
 
 use anland_sys::*;

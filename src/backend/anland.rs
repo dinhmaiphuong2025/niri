@@ -709,30 +709,15 @@ impl Anland {
 
         let now = get_monotonic_time();
         let events = std::mem::take(&mut self.pending_presentation_events);
+        let feedbacks = std::mem::take(&mut self.pending_feedbacks);
 
-        for ev in &events {
-            let presentation_time = if ev.tv_sec > 0 || ev.tv_nsec > 0 {
-                Duration::new(ev.tv_sec as u64, ev.tv_nsec)
-            } else {
-                now
-            };
+        let last_seq = events.last().map(|ev| ev.frame_seq as u64).unwrap_or(0);
 
-            for mut feedback in std::mem::take(&mut self.pending_feedbacks) {
-                feedback.presented::<_, smithay::utils::Monotonic>(
-                    presentation_time,
-                    Refresh::Unknown,
-                    ev.frame_seq as u64,
-                    wp_presentation_feedback::Kind::HwCompletion | wp_presentation_feedback::Kind::HwClock,
-                );
-            }
-        }
-
-        // If there were any leftover feedbacks (e.g. initial flush), present with `now`
-        for mut feedback in std::mem::take(&mut self.pending_feedbacks) {
+        for mut feedback in feedbacks {
             feedback.presented::<_, smithay::utils::Monotonic>(
                 now,
                 Refresh::Unknown,
-                0,
+                last_seq,
                 wp_presentation_feedback::Kind::empty(),
             );
         }

@@ -709,27 +709,42 @@ impl Anland {
 
         let now = get_monotonic_time();
         let events = std::mem::take(&mut self.pending_presentation_events);
-        let feedbacks = std::mem::take(&mut self.pending_feedbacks);
 
-        let last_seq = events.last().map(|ev| ev.frame_seq as u64).unwrap_or(0);
+        for ev in &events {
+            // Use the Niri container's monotonic clock to avoid jitter from host clock differences.
+            let presentation_time = now;
 
-        for mut feedback in feedbacks {
+            if let Some(mut feedback) = self.pending_feedbacks.pop_front() {
+                feedback.presented::<_, smithay::utils::Monotonic>(
+                    presentation_time,
+                    Refresh::Unknown,
+                    ev.frame_seq as u64,
+                    wp_presentation_feedback::Kind::HwCompletion | wp_presentation_feedback::Kind::HwClock,
+                );
+            }
+        }
+
+        // If there were any leftover feedbacks (e.g. initial flush), present with `now`
+        for mut feedback in std::mem::take(&mut self.pending_feedbacks) {
             feedback.presented::<_, smithay::utils::Monotonic>(
                 now,
                 Refresh::Unknown,
-                last_seq,
+                0,
                 wp_presentation_feedback::Kind::empty(),
             );
         }
 
         if self.has_pending_frame_callbacks {
             self.has_pending_frame_callbacks = false;
-            niri.send_frame_callbacks(&output);
 
-            if let Some(output_state) = niri.output_state.get(&output) {
-                if output_state.unfinished_animations_remain {
-                    niri.queue_redraw(&output);
-                }
+            let unfinished = niri.output_state.get(&output)
+                .map(|s| s.unfinished_animations_remain)
+                .unwrap_or(false);
+
+            if !unfinished {
+                niri.send_frame_callbacks(&output);
+            } else {
+                niri.queue_redraw(&output);
             }
         }
     }

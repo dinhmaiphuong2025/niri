@@ -275,7 +275,7 @@ pub struct Anland {
 
     // Presentation feedback & frame pacing (VSync synchronization)
     has_pending_frame_callbacks: bool,
-    pending_feedbacks: Vec<OutputPresentationFeedback>,
+    pending_feedbacks: std::collections::VecDeque<OutputPresentationFeedback>,
     pending_presentation_events: Vec<anland_sys::InputPresented>,
 
     ipc_outputs: Arc<Mutex<IpcOutputMap>>,
@@ -324,7 +324,7 @@ impl Anland {
             was_animating: false,
             was_in_overview: false,
             has_pending_frame_callbacks: false,
-            pending_feedbacks: Vec::new(),
+            pending_feedbacks: std::collections::VecDeque::new(),
             pending_presentation_events: Vec::new(),
             ipc_outputs: Arc::new(Mutex::new(HashMap::new())),
             pending_clipboard: None,
@@ -1190,7 +1190,7 @@ impl Anland {
         // when the consumer signals that SurfaceFlinger completed presentation.
         let presentation_feedbacks =
             niri.take_presentation_feedbacks(output, &res.states);
-        self.pending_feedbacks.push(presentation_feedbacks);
+        self.pending_feedbacks.push_back(presentation_feedbacks);
 
         let output_state = niri.output_state.get_mut(output).unwrap();
         match mem::replace(&mut output_state.redraw_state, RedrawState::Idle) {

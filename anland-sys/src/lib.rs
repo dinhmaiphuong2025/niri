@@ -42,6 +42,7 @@ pub union InputEventUnion {
     pub text_input: InputTextInput,
     pub input_action: InputAction,
     pub resource: InputResource,
+    pub presented: InputPresented,
     pub padding: [u32; 4],
 }
 
@@ -124,6 +125,15 @@ pub struct InputResource {
     pub fdnum: u32,
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct InputPresented {
+    pub buffer_index: u32,
+    pub frame_seq: u32,
+    pub tv_sec: u32,
+    pub tv_nsec: u32,
+}
+
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
 pub struct OutputEvent {
@@ -174,6 +184,8 @@ pub const INPUT_TYPE_ACTION: u32 = 10;
 pub const INPUT_TYPE_RESOURCE: u32 = 11;
 pub const INPUT_TYPE_RESOURCE_INVALID: u32 = 12;
 pub const INPUT_TYPE_DISPLAY_ROTATION: u32 = 13;
+pub const INPUT_TYPE_CAPS: u32 = 14;
+pub const INPUT_TYPE_PRESENTED: u32 = 15;
 
 // Input action constants
 pub const INPUT_ACTION_DOWN: i32 = 0;

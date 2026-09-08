@@ -64,6 +64,21 @@ struct buf_info {
 #define INPUT_TYPE_ACTION 10
 #define INPUT_TYPE_RESOURCE 11
 #define INPUT_TYPE_RESOURCE_INVALID 12
+/* Consumer -> producer: the current Android display rotation (Display.getRotation()
+ * scaled to degrees CCW: 0/90/180/270). The compositor mirrors it onto its output
+ * transform so the desktop stays upright when the device rotates. Reuses the
+ * InputEvent framing like INPUT_TYPE_DISPLAY_REFRESH. */
+#define INPUT_TYPE_DISPLAY_ROTATION 13
+/* Consumer -> producer: capability bitmask announced once per connection (and
+ * re-sent after every fallback recovery). Bit 0 (CONSUMER_CAP_CURSOR_PLANE)
+ * means the consumer renders a separate cursor sprite layer, so the producer
+ * must stop drawing the cursor into the framebuffer and instead stream
+ * CURSOR_POS/CURSOR_BITMAP output events. */
+#define INPUT_TYPE_CAPS 14
+/* Consumer -> producer: frame presentation notification. Sent when SurfaceFlinger
+ * releases a previously queued buffer (acquire fence signaled). Allows the
+ * compositor to synchronize its Wayland frame callbacks to actual display VSync. */
+#define INPUT_TYPE_PRESENTED 15
 
 #define SERVICE_TYPE_CAMERA 1
 
@@ -123,6 +138,9 @@ struct InputEvent {
             uint32_t refresh_mhz; // current display refresh rate, milli-Hz
         } display;
         struct {
+            uint32_t angle_deg; // current display rotation, degrees CCW (0/90/180/270)
+        } display_rotation;
+        struct {
             uint32_t size; //这个packet只是通知包 作为header真正数据会集中发送,这里通知随后数据的大小
         } clipboard;
         struct {
@@ -136,6 +154,15 @@ struct InputEvent {
             uint32_t type;
             uint32_t fdnum;//fdnum是fd的数量,后续会有fdnum个fd跟随在这个结构体后面
         } resource;
+        struct {
+            uint32_t caps; /* CONSUMER_CAP_* bitmask (INPUT_TYPE_CAPS) */
+        } input_caps;
+        struct {
+            uint32_t buffer_index;
+            uint32_t frame_seq;
+            uint32_t tv_sec;
+            uint32_t tv_nsec;
+        } presented;
         struct {
             uint32_t padding[4];
         };

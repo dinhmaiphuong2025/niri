@@ -25,7 +25,7 @@ use smithay::reexports::calloop::{
 use smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback;
 use smithay::utils::Size;
 use smithay::wayland::dmabuf::{DmabufFeedback, DmabufFeedbackBuilder, DmabufGlobal};
-use smithay::wayland::presentation::Refresh;
+use smithay::wayland::presentation::{OutputPresentationFeedback, Refresh};
 use smithay::wayland::selection::data_device::set_data_device_selection;
 
 use anland_sys::*;
@@ -272,6 +272,11 @@ pub struct Anland {
     was_overview_animating: bool,
     was_in_overview: bool,
 
+    // Presentation feedback & frame pacing (VSync synchronization)
+    has_pending_frame_callbacks: bool,
+    pending_feedbacks: Vec<OutputPresentationFeedback>,
+    pending_presentation_events: Vec<anland_sys::InputPresented>,
+
     ipc_outputs: Arc<Mutex<IpcOutputMap>>,
 
     // Clipboard text received from the Android consumer (anland INPUT_TYPE_CLIPBOARD),
@@ -317,6 +322,9 @@ impl Anland {
             full_damage_frames_remaining: 0,
             was_overview_animating: false,
             was_in_overview: false,
+            has_pending_frame_callbacks: false,
+            pending_feedbacks: Vec::new(),
+            pending_presentation_events: Vec::new(),
             ipc_outputs: Arc::new(Mutex::new(HashMap::new())),
             pending_clipboard: None,
             pending_rotation: None,
@@ -534,9 +542,13 @@ impl Anland {
         // Force full damage across ALL buffers in the pool (e.g. 4 frames)
         // so every newly allocated Android buffer is 100% cleanly rendered.
         self.full_damage_frames_remaining = self.dmabufs.len().max(4);
+        self.has_pending_frame_callbacks = false;
+        self.pending_feedbacks.clear();
+        self.pending_presentation_events.clear();
         if let Some(output) = &self.output {
             self.damage_tracker = Some(OutputDamageTracker::from_output(output));
             niri.queue_redraw(output);
+            niri.send_frame_callbacks(output);
         }
 
         self.register_buffer_ready_source(niri);
@@ -671,6 +683,8 @@ impl Anland {
         let timer = Timer::from_duration(Duration::from_millis(4000));
         if let Ok(token) = niri.event_loop.insert_source(timer, move |_, _, state| {
             let anland = state.backend.anland();
+            // Flush any waiting presentation feedbacks/callbacks if the consumer went idle
+            anland.flush_presentation_feedback(&mut state.niri);
             // Consumer timeout is 5s. If we hit 4s without a render, force a full clean repaint.
             anland.full_damage_frames_remaining = anland.dmabufs.len().max(4);
             if let Some(output) = anland.output.clone() {
@@ -679,6 +693,58 @@ impl Anland {
             TimeoutAction::ToDuration(Duration::from_millis(4000))
         }) {
             self.heartbeat_timer_token = Some(token);
+        }
+    }
+
+    /// Flush pending presentation feedbacks and deliver Wayland frame callbacks
+    /// when the Android consumer signals that SurfaceFlinger has presented a frame.
+    pub fn flush_presentation_feedback(&mut self, niri: &mut Niri) {
+        let Some(output) = self.output.clone() else {
+            self.pending_presentation_events.clear();
+            self.pending_feedbacks.clear();
+            self.has_pending_frame_callbacks = false;
+            return;
+        };
+
+        let now = get_monotonic_time();
+        let events = std::mem::take(&mut self.pending_presentation_events);
+
+        for ev in &events {
+            let presentation_time = if ev.tv_sec > 0 || ev.tv_nsec > 0 {
+                Duration::new(ev.tv_sec as u64, ev.tv_nsec)
+            } else {
+                now
+            };
+
+            for mut feedback in std::mem::take(&mut self.pending_feedbacks) {
+                feedback.presented::<_, smithay::utils::Monotonic>(
+                    presentation_time,
+                    Refresh::Unknown,
+                    ev.frame_seq as u64,
+                    wp_presentation_feedback::Kind::HwCompletion | wp_presentation_feedback::Kind::HwClock,
+                );
+            }
+        }
+
+        // If there were any leftover feedbacks (e.g. initial flush), present with `now`
+        for mut feedback in std::mem::take(&mut self.pending_feedbacks) {
+            feedback.presented::<_, smithay::utils::Monotonic>(
+                now,
+                Refresh::Unknown,
+                0,
+                wp_presentation_feedback::Kind::empty(),
+            );
+        }
+
+        if self.has_pending_frame_callbacks {
+            self.has_pending_frame_callbacks = false;
+            niri.send_frame_callbacks(&output);
+
+            if let Some(output_state) = niri.output_state.get(&output) {
+                if output_state.unfinished_animations_remain {
+                    niri.queue_redraw(&output);
+                }
+            }
         }
     }
 
@@ -741,6 +807,9 @@ impl Anland {
             if let Some(angle_deg) = state.backend.anland().take_pending_rotation() {
                 info!("anland display rotation {} deg (geometry follows screen info)", angle_deg);
             }
+            // Deliver presentation feedbacks and frame callbacks when SurfaceFlinger
+            // scanout is complete (VSync synchronization).
+            state.backend.anland().flush_presentation_feedback(&mut state.niri);
         }) {
             self.data_source_token = Some(token);
         }
@@ -874,6 +943,15 @@ impl Anland {
                     // compositor-local clients can paste what was copied on Android.
                     self.pending_clipboard = Some(buf);
                 }
+                true
+            }
+            INPUT_TYPE_PRESENTED => {
+                let p = unsafe { event.data.presented };
+                debug!(
+                    "presentation feedback: buffer_idx={} seq={} ts={}.{:09}",
+                    p.buffer_index, p.frame_seq, p.tv_sec, p.tv_nsec
+                );
+                self.pending_presentation_events.push(p);
                 true
             }
             _ => false,
@@ -1104,14 +1182,11 @@ impl Anland {
 
         niri.update_primary_scanout_output(output, &res.states);
 
-        let mut presentation_feedbacks =
+        // Stage presentation feedback and frame callbacks to be delivered
+        // when the consumer signals that SurfaceFlinger completed presentation.
+        let presentation_feedbacks =
             niri.take_presentation_feedbacks(output, &res.states);
-        presentation_feedbacks.presented::<_, smithay::utils::Monotonic>(
-            get_monotonic_time(),
-            Refresh::Unknown,
-            0,
-            wp_presentation_feedback::Kind::empty(),
-        );
+        self.pending_feedbacks.push(presentation_feedbacks);
 
         let output_state = niri.output_state.get_mut(output).unwrap();
         match mem::replace(&mut output_state.redraw_state, RedrawState::Idle) {
@@ -1124,9 +1199,7 @@ impl Anland {
         output_state.frame_callback_sequence =
             output_state.frame_callback_sequence.wrapping_add(1);
 
-        // Deliver frame callbacks (wl_surface_frame / wl_callback.done) to Noctalia and
-        // other Wayland clients now so they can begin preparing the next frame immediately.
-        niri.send_frame_callbacks(output);
+        self.has_pending_frame_callbacks = true;
 
         let frame_time_ms = frame_start.elapsed().as_millis() as u64;
         self.frame_times.push_back(frame_time_ms);

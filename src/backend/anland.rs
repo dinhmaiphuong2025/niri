@@ -531,6 +531,10 @@ impl Anland {
             self.ctx.screen_info().width,
             self.ctx.screen_info().height,
         );
+        info!(
+            "reconnect instrumentation: sweep_frames={} (each pre-sweep present may show stale content)",
+            self.dmabufs.len().max(4)
+        );
 
         let dims = (dmabuf_w != 0).then_some((dmabuf_w as i32, dmabuf_h as i32));
         self.update_output_mode_with(dims);

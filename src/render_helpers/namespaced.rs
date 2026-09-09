@@ -1,9 +1,6 @@
-use smithay::backend::renderer::element::{Element, Id, UnderlyingStorage};
-use smithay::backend::renderer::utils::CommitCounter;
-use smithay::backend::renderer::Renderer;
-use smithay::backend::renderer::element::RenderElement;
-use smithay::utils::{Physical, Rectangle, Scale, Transform};
-use smithay::backend::allocator::Buffer;
+use smithay::backend::renderer::element::{Element, Id, Kind, RenderElement, UnderlyingStorage};
+use smithay::backend::renderer::utils::{CommitCounter, DamageSet, OpaqueRegions};
+use smithay::utils::{Buffer, Physical, Rectangle, Scale, Transform};
 
 #[derive(Debug)]
 pub struct NamespacedRenderElement<E> {
@@ -29,10 +26,6 @@ impl<E: Element> Element for NamespacedRenderElement<E> {
         self.inner.current_commit()
     }
 
-    fn src(&self) -> Rectangle<f64, Buffer> {
-        self.inner.src()
-    }
-
     fn geometry(&self, scale: Scale<f64>) -> Rectangle<i32, Physical> {
         self.inner.geometry(scale)
     }
@@ -41,15 +34,19 @@ impl<E: Element> Element for NamespacedRenderElement<E> {
         self.inner.transform()
     }
 
+    fn src(&self) -> Rectangle<f64, Buffer> {
+        self.inner.src()
+    }
+
     fn damage_since(
         &self,
         scale: Scale<f64>,
         commit: Option<CommitCounter>,
-    ) -> Vec<Rectangle<i32, Physical>> {
+    ) -> DamageSet<i32, Physical> {
         self.inner.damage_since(scale, commit)
     }
 
-    fn opaque_regions(&self, scale: Scale<f64>) -> Vec<Rectangle<i32, Physical>> {
+    fn opaque_regions(&self, scale: Scale<f64>) -> OpaqueRegions<i32, Physical> {
         self.inner.opaque_regions(scale)
     }
 
@@ -57,8 +54,12 @@ impl<E: Element> Element for NamespacedRenderElement<E> {
         self.inner.alpha()
     }
 
-    fn is_opaque(&self) -> bool {
-        self.inner.is_opaque()
+    fn kind(&self) -> Kind {
+        self.inner.kind()
+    }
+
+    fn is_framebuffer_effect(&self) -> bool {
+        self.inner.is_framebuffer_effect()
     }
 }
 
@@ -77,6 +78,16 @@ where
         cache: Option<&smithay::utils::user_data::UserDataMap>,
     ) -> Result<(), R::Error> {
         RenderElement::<R>::draw(&self.inner, frame, src, dst, damage, opaque_regions, cache)
+    }
+
+    fn capture_framebuffer(
+        &self,
+        frame: &mut R::Frame<'_, '_>,
+        src: Rectangle<f64, Buffer>,
+        dst: Rectangle<i32, Physical>,
+        cache: &smithay::utils::user_data::UserDataMap,
+    ) -> Result<(), R::Error> {
+        RenderElement::<R>::capture_framebuffer(&self.inner, frame, src, dst, cache)
     }
 
     fn underlying_storage(&self, renderer: &mut R) -> Option<UnderlyingStorage<'_>> {

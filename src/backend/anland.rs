@@ -1101,6 +1101,8 @@ impl Anland {
 
         let idx = self.ctx.selected_buffer_index();
         if idx < 0 || idx as usize >= self.dmabufs.len() {
+            // DIAG-TRACE: remove after flicker diagnosis.
+            info!("trace SKIP bad-idx={} poolsize={}", idx, self.dmabufs.len());
             return RenderResult::Skipped;
         }
 
@@ -1174,6 +1176,19 @@ impl Anland {
             }
         };
         drop(target);
+
+        // DIAG-TRACE: one compact line per frame for flicker diagnosis.
+        // Remove after diagnosis is complete.
+        info!(
+            "trace frame={} idx={} age={} valid={} overview={} ws={:?} damage={:?}",
+            self.frame_count,
+            idx,
+            age,
+            buffer_valid,
+            in_overview,
+            current_ws,
+            res.damage,
+        );
 
         // If nothing changed on screen, skip frame-callback dispatch,
         // presentation feedback, and GPU sync entirely to avoid wasting cycles.

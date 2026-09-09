@@ -1106,21 +1106,17 @@ impl Anland {
 
         let current_ws = niri.layout.active_workspace().map(|ws| ws.id().get());
         let in_overview = niri.is_in_overview();
-        let is_animating = niri.output_state.get(output)
-            .map(|s| s.unfinished_animations_remain)
-            .unwrap_or(false);
 
         // Check if the dequeued buffer still contains pixels from the current
         // workspace and overview mode. If it was last rendered on a different
-        // workspace or in a different overview state (or while an animation was ongoing),
-        // its contents are invalid for partial damage -> force full repaint (age = 0).
+        // workspace or in a different overview state, its background and windows
+        // are from another workspace/mode -> force full repaint (age = 0).
         let buffer_valid = self.last_workspace_per_buffer.get(idx as usize)
             .copied()
             .flatten() == current_ws
             && self.last_overview_per_buffer.get(idx as usize)
             .copied()
-            .flatten() == Some(in_overview)
-            && !is_animating;
+            .flatten() == Some(in_overview);
 
         let last = self.last_frame_per_buffer[idx as usize];
         let mut age = if buffer_valid && last >= 0 {

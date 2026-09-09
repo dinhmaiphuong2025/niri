@@ -4441,8 +4441,9 @@ impl Niri {
 
             // Macro instead of closure to avoid borrowing push().
             macro_rules! process {
-                ($geo:expr) => {{
+                ($geo:expr, $ns:expr) => {{
                     &mut |elem| {
+                        let elem = crate::render_helpers::namespaced::NamespacedRenderElement::new(elem, $ns.unwrap());
                         if let Some(elem) = scale_relocate_crop(elem, output_scale, zoom, $geo) {
                             push(elem.into());
                         }
@@ -4453,8 +4454,8 @@ impl Niri {
             for (ws, geo) in mon.workspaces_with_render_geo() {
                 let ns = Some(ws.id().get() as usize);
                 let xray_pos = XrayPos::new(geo.loc, zoom);
-                push_popups_from_layer!(Layer::Bottom, ns, xray_pos, process!(geo));
-                push_popups_from_layer!(Layer::Background, ns, xray_pos, process!(geo));
+                push_popups_from_layer!(Layer::Bottom, ns, xray_pos, process!(geo, ns));
+                push_popups_from_layer!(Layer::Background, ns, xray_pos, process!(geo, ns));
             }
 
             mon.render_workspaces(ctx.r(), focus_ring, &mut |elem| push(elem.into()));
@@ -4470,10 +4471,15 @@ impl Niri {
                 // damage tracker.
                 let ns = Some(ws.id().get() as usize);
                 let xray_pos = XrayPos::new(geo.loc, zoom);
-                push_normal_from_layer!(Layer::Bottom, ns, xray_pos, process!(geo));
-                push_normal_from_layer!(Layer::Background, ns, xray_pos, process!(geo));
+                push_normal_from_layer!(Layer::Bottom, ns, xray_pos, process!(geo, ns));
+                push_normal_from_layer!(Layer::Background, ns, xray_pos, process!(geo, ns));
 
-                process!(geo)(ws.render_background());
+                let mut ws_bg_push = |elem| {
+                    if let Some(elem) = scale_relocate_crop(elem, output_scale, zoom, geo) {
+                        push(elem.into());
+                    }
+                };
+                ws_bg_push(ws.render_background());
             }
         }
 
@@ -6574,6 +6580,8 @@ niri_render_elements! {
         Monitor = MonitorRenderElement<R>,
         RescaledTile = RescaleRenderElement<TileRenderElement<R>>,
         LayerSurface = LayerSurfaceRenderElement<R>,
+        NamespacedLayerSurface = crate::render_helpers::namespaced::NamespacedRenderElement<LayerSurfaceRenderElement<R>>,
+        RelocatedNamespacedLayerSurface = CropRenderElement<RelocateRenderElement<RescaleRenderElement<crate::render_helpers::namespaced::NamespacedRenderElement<LayerSurfaceRenderElement<R>>>>>,
         RelocatedLayerSurface = CropRenderElement<RelocateRenderElement<RescaleRenderElement<
             LayerSurfaceRenderElement<R>
         >>>,

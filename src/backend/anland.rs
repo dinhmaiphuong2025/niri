@@ -270,7 +270,6 @@ pub struct Anland {
     data_source_token: Option<RegistrationToken>,
     heartbeat_timer_token: Option<RegistrationToken>,
     full_damage_frames_remaining: usize,
-    was_animating: bool,
     was_in_overview: bool,
 
     // Presentation feedback & frame pacing (VSync synchronization)
@@ -321,7 +320,6 @@ impl Anland {
             data_source_token: None,
             heartbeat_timer_token: None,
             full_damage_frames_remaining: 0,
-            was_animating: false,
             was_in_overview: false,
             has_pending_frame_callbacks: false,
             pending_feedbacks: std::collections::VecDeque::new(),
@@ -494,7 +492,6 @@ impl Anland {
         self.dmabufs.clear();
         self.last_frame_per_buffer.clear();
         self.frame_count = 0;
-        self.was_animating = false;
         self.was_in_overview = false;
 
         // Dimensions of the buffers the consumer actually allocated this
@@ -1110,24 +1107,15 @@ impl Anland {
             0
         };
 
-        let output_state = niri.output_state.get(output).unwrap();
-        let is_animating = output_state.unfinished_animations_remain;
         let in_overview = niri.is_in_overview();
 
-        // While any animation is ongoing (overview zoom, workspace switch, window
-        // open/close), layout geometry changes constantly. Due to Mesa-KGSL Adreno
-        // bugs with FBO GMEM loads, glScissor partial damage leaves artifacts
-        // outside the damage rect — force full repaint (age = 0).
-        // When animations complete, trigger a clean sweep across all buffers in the
-        // swapchain pool so every DMABUF receives the new stationary layout before
-        // reverting to partial damage rendering.
-        if is_animating {
-            age = 0;
-        } else if self.was_animating || (self.was_in_overview != in_overview) {
+        // When overview completes an open/close transition, trigger a clean sweep
+        // across all buffers in the swapchain pool so every DMABUF receives the
+        // new stationary layout before reverting to partial damage rendering.
+        if self.was_in_overview != in_overview {
             self.full_damage_frames_remaining = self.dmabufs.len().max(4);
         }
 
-        self.was_animating = is_animating;
         self.was_in_overview = in_overview;
 
         if self.full_damage_frames_remaining > 0 {

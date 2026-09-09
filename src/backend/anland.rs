@@ -745,15 +745,12 @@ impl Anland {
 
         if self.has_pending_frame_callbacks {
             self.has_pending_frame_callbacks = false;
+            niri.send_frame_callbacks(&output);
 
-            let unfinished = niri.output_state.get(&output)
-                .map(|s| s.unfinished_animations_remain)
-                .unwrap_or(false);
-
-            if !unfinished {
-                niri.send_frame_callbacks(&output);
-            } else {
-                niri.queue_redraw(&output);
+            if let Some(output_state) = niri.output_state.get(&output) {
+                if output_state.unfinished_animations_remain {
+                    niri.queue_redraw(&output);
+                }
             }
         }
     }

@@ -278,6 +278,11 @@ pub struct Anland {
     has_pending_frame_callbacks: bool,
     pending_feedbacks: std::collections::VecDeque<OutputPresentationFeedback>,
     pending_presentation_events: Vec<anland_sys::InputPresented>,
+    // Last time a real presentation signal arrived from the consumer.
+    // Used as a stall guard: if the consumer stops signalling (old APK,
+    // stalled pipeline), pending callbacks are flushed anyway after
+    // PRESENT_STALL_TIMEOUT so Wayland clients can never freeze.
+    last_presented_at: Duration,
 
     ipc_outputs: Arc<Mutex<IpcOutputMap>>,
 
@@ -292,6 +297,11 @@ pub struct Anland {
 }
 
 impl Anland {
+    /// Maximum time Wayland frame callbacks may wait for a consumer
+    /// presentation signal before being flushed anyway. Covers old consumers
+    /// that never send `INPUT_TYPE_PRESENTED` and stalled pipelines.
+    const PRESENT_STALL_TIMEOUT: Duration = Duration::from_millis(100);
+
     pub fn new(socket_path: String) -> anyhow::Result<Self> {
         let _span = tracy_client::span!("Anland::new");
 
@@ -326,6 +336,7 @@ impl Anland {
             has_pending_frame_callbacks: false,
             pending_feedbacks: std::collections::VecDeque::new(),
             pending_presentation_events: Vec::new(),
+            last_presented_at: Duration::ZERO,
             ipc_outputs: Arc::new(Mutex::new(HashMap::new())),
             pending_clipboard: None,
             pending_rotation: None,
@@ -706,8 +717,15 @@ impl Anland {
         }
     }
 
-    /// Flush pending presentation feedbacks and deliver Wayland frame callbacks
-    /// when the Android consumer signals that SurfaceFlinger has presented a frame.
+    /// Flush pending presentation feedbacks and deliver Wayland frame callbacks.
+    ///
+    /// Frame callbacks are gated on real presentation signals from the Android
+    /// consumer (one `INPUT_TYPE_PRESENTED` per presented frame), so Wayland
+    /// clients pace themselves to actual SurfaceFlinger scanout instead of
+    /// rendering ahead and queueing up latency. If no presentation signal has
+    /// arrived for longer than `PRESENT_STALL_TIMEOUT` (old consumer without
+    /// presentation events, stalled pipeline), pending callbacks are flushed
+    /// anyway so clients can never freeze.
     pub fn flush_presentation_feedback(&mut self, niri: &mut Niri) {
         let Some(output) = self.output.clone() else {
             self.pending_presentation_events.clear();
@@ -718,6 +736,10 @@ impl Anland {
 
         let now = get_monotonic_time();
         let events = std::mem::take(&mut self.pending_presentation_events);
+
+        if !events.is_empty() {
+            self.last_presented_at = now;
+        }
 
         for ev in &events {
             // Use the Niri container's monotonic clock to avoid jitter from host clock differences.
@@ -733,17 +755,10 @@ impl Anland {
             }
         }
 
-        // If there were any leftover feedbacks (e.g. initial flush), present with `now`
-        for mut feedback in std::mem::take(&mut self.pending_feedbacks) {
-            feedback.presented::<_, smithay::utils::Monotonic>(
-                now,
-                Refresh::Unknown,
-                0,
-                wp_presentation_feedback::Kind::empty(),
-            );
-        }
-
-        if self.has_pending_frame_callbacks {
+        if self.has_pending_frame_callbacks
+            && (!events.is_empty()
+                || now.saturating_sub(self.last_presented_at) > Self::PRESENT_STALL_TIMEOUT)
+        {
             self.has_pending_frame_callbacks = false;
             niri.send_frame_callbacks(&output);
 
@@ -1101,8 +1116,6 @@ impl Anland {
 
         let idx = self.ctx.selected_buffer_index();
         if idx < 0 || idx as usize >= self.dmabufs.len() {
-            // DIAG-TRACE: remove after flicker diagnosis.
-            info!("trace SKIP bad-idx={} poolsize={}", idx, self.dmabufs.len());
             return RenderResult::Skipped;
         }
 
@@ -1176,19 +1189,6 @@ impl Anland {
             }
         };
         drop(target);
-
-        // DIAG-TRACE: one compact line per frame for flicker diagnosis.
-        // Remove after diagnosis is complete.
-        info!(
-            "trace frame={} idx={} age={} valid={} overview={} ws={:?} damage={:?}",
-            self.frame_count,
-            idx,
-            age,
-            buffer_valid,
-            in_overview,
-            current_ws,
-            res.damage,
-        );
 
         // If nothing changed on screen, skip frame-callback dispatch,
         // presentation feedback, and GPU sync entirely to avoid wasting cycles.

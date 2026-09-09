@@ -261,6 +261,8 @@ pub struct Anland {
     // the refresh rate).
     frame_count: u64,
     last_frame_per_buffer: Vec<i64>,
+    last_workspace_per_buffer: Vec<Option<u64>>,
+    last_overview_per_buffer: Vec<Option<bool>>,
 
     // Frame timing for debugging
     frame_times: std::collections::VecDeque<u64>,
@@ -329,6 +331,8 @@ impl Anland {
             pending_rotation: None,
             frame_count: 0,
             last_frame_per_buffer: Vec::new(),
+            last_workspace_per_buffer: Vec::new(),
+            last_overview_per_buffer: Vec::new(),
             frame_times: std::collections::VecDeque::new(),
         })
     }
@@ -491,6 +495,8 @@ impl Anland {
 
         self.dmabufs.clear();
         self.last_frame_per_buffer.clear();
+        self.last_workspace_per_buffer.clear();
+        self.last_overview_per_buffer.clear();
         self.frame_count = 0;
         self.was_in_overview = false;
 
@@ -522,6 +528,8 @@ impl Anland {
         }
 
         self.last_frame_per_buffer.resize(self.dmabufs.len(), -1);
+        self.last_workspace_per_buffer.resize(self.dmabufs.len(), None);
+        self.last_overview_per_buffer.resize(self.dmabufs.len(), None);
 
         info!(
             "connected to anland consumer: {} buffers, {}x{} (screen info says {}x{})",
@@ -1099,8 +1107,26 @@ impl Anland {
             return RenderResult::Skipped;
         }
 
+        let current_ws = niri.layout.active_workspace().map(|ws| ws.id().get());
+        let in_overview = niri.is_in_overview();
+        let is_animating = niri.output_state.get(output)
+            .map(|s| s.unfinished_animations_remain)
+            .unwrap_or(false);
+
+        // Check if the dequeued buffer still contains pixels from the current
+        // workspace and overview mode. If it was last rendered on a different
+        // workspace or in a different overview state (or while an animation was ongoing),
+        // its contents are invalid for partial damage -> force full repaint (age = 0).
+        let buffer_valid = self.last_workspace_per_buffer.get(idx as usize)
+            .copied()
+            .flatten() == current_ws
+            && self.last_overview_per_buffer.get(idx as usize)
+            .copied()
+            .flatten() == Some(in_overview)
+            && !is_animating;
+
         let last = self.last_frame_per_buffer[idx as usize];
-        let mut age = if last >= 0 {
+        let mut age = if buffer_valid && last >= 0 {
             let calculated_age = (self.frame_count - last as u64) as usize;
             if calculated_age >= 1 && calculated_age <= 4 {
                 calculated_age
@@ -1110,8 +1136,6 @@ impl Anland {
         } else {
             0
         };
-
-        let in_overview = niri.is_in_overview();
 
         // When overview completes an open/close transition, trigger a clean sweep
         // across all buffers in the swapchain pool so every DMABUF receives the
@@ -1175,6 +1199,10 @@ impl Anland {
         // Only advance the buffer-bank age accounting on a frame with actual damage!
         self.last_frame_per_buffer[idx as usize] = self.frame_count as i64;
         self.frame_count = self.frame_count.wrapping_add(1);
+        if (idx as usize) < self.last_workspace_per_buffer.len() {
+            self.last_workspace_per_buffer[idx as usize] = current_ws;
+            self.last_overview_per_buffer[idx as usize] = Some(in_overview);
+        }
 
         niri.update_primary_scanout_output(output, &res.states);
 

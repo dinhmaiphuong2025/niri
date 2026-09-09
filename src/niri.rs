@@ -4475,6 +4475,7 @@ impl Niri {
                 push_normal_from_layer!(Layer::Background, ns, xray_pos, process!(geo, ns));
 
                 let mut ws_bg_push = |elem| {
+                    let elem = crate::render_helpers::namespaced::NamespacedRenderElement::new(elem, ns.unwrap());
                     if let Some(elem) = scale_relocate_crop(elem, output_scale, zoom, geo) {
                         push(elem.into());
                     }
@@ -6587,6 +6588,9 @@ niri_render_elements! {
         >>>,
         RelocatedColor = CropRenderElement<RelocateRenderElement<RescaleRenderElement<
             SolidColorRenderElement
+        >>>,
+        RelocatedNamespacedColor = CropRenderElement<RelocateRenderElement<RescaleRenderElement<
+            crate::render_helpers::namespaced::NamespacedRenderElement<SolidColorRenderElement>
         >>>,
         Pointer = PointerRenderElements<R>,
         Wayland = WaylandSurfaceRenderElement<R>,

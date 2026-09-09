@@ -608,12 +608,17 @@ typedef void *(*eglCreateSyncKHR_t)(void *dpy, unsigned int type, const int *att
 typedef int (*eglDupNativeFenceFDANDROID_t)(void *dpy, void *sync);
 typedef unsigned int (*eglDestroySyncKHR_t)(void *dpy, void *sync);
 typedef void (*glFlush_t)(void);
+typedef void (*glFinish_t)(void);
 
 static eglCreateSyncKHR_t s_pCreateSync = NULL;
 static eglDupNativeFenceFDANDROID_t s_pDupFence = NULL;
 static eglDestroySyncKHR_t s_pDestroySync = NULL;
 static glFlush_t s_pGlFlush = NULL;
+static glFinish_t s_pGlFinish = NULL;
 static bool s_egl_inited = false;
+/* Diagnostic counters for native fence creation (see create_native_render_fence). */
+static unsigned long long s_fence_ok = 0;
+static unsigned long long s_fence_fail = 0;
 
 static void init_egl_procs(void)
 {
@@ -633,6 +638,7 @@ static void init_egl_procs(void)
         s_pDupFence = (eglDupNativeFenceFDANDROID_t)get_proc("eglDupNativeFenceFDANDROID");
         s_pDestroySync = (eglDestroySyncKHR_t)get_proc("eglDestroySyncKHR");
         s_pGlFlush = (glFlush_t)get_proc("glFlush");
+        s_pGlFinish = (glFinish_t)get_proc("glFinish");
     }
     if (!s_pGlFlush) {
         void *gles_handle = dlopen("libGLESv2.so.2", RTLD_LAZY | RTLD_LOCAL);
@@ -640,7 +646,11 @@ static void init_egl_procs(void)
             gles_handle = dlopen("libGLESv2.so", RTLD_LAZY | RTLD_LOCAL);
         if (gles_handle) {
             s_pGlFlush = (glFlush_t)dlsym(gles_handle, "glFlush");
+            if (!s_pGlFinish)
+                s_pGlFinish = (glFinish_t)dlsym(gles_handle, "glFinish");
         }
+    } else if (!s_pGlFinish && get_proc) {
+        s_pGlFinish = (glFinish_t)get_proc("glFinish");
     }
 }
 
@@ -651,21 +661,51 @@ int create_native_render_fence(void *egl_display)
 
     init_egl_procs();
 
-    // MUST flush GL pipeline before creating fence sync
-    if (s_pGlFlush) {
+    /* Diagnostic / experiment flag: ANLAND_FINISH_FENCE=1 forces a full GPU
+     * stall before creating the fence (glFinish instead of glFlush). Used to
+     * prove whether a fence race is the flicker root cause. */
+    const char *finish_env = getenv("ANLAND_FINISH_FENCE");
+    int use_finish = (finish_env && finish_env[0] == '1');
+    if (use_finish && s_pGlFinish) {
+        s_pGlFinish();
+    } else if (s_pGlFlush) {
         s_pGlFlush();
     }
 
     if (!s_pCreateSync || !s_pDupFence || !s_pDestroySync) {
+        s_fence_fail++;
+        if ((s_fence_ok + s_fence_fail) % 60 == 0) {
+            double total = (double)(s_fence_ok + s_fence_fail);
+            double ok_rate = total > 0 ? (100.0 * s_fence_ok / total) : 0;
+            ANLAND_LOG("native fence ok=%llu fail=%llu rate=%.1f%% (finish=%d) [no procs]",
+                       s_fence_ok, s_fence_fail, ok_rate, use_finish);
+        }
         return -1;
     }
 
     void *sync = s_pCreateSync(egl_display, EGL_SYNC_NATIVE_FENCE_ANDROID, NULL);
     if (sync == EGL_NO_SYNC_KHR || !sync) {
+        s_fence_fail++;
+        if ((s_fence_ok + s_fence_fail) % 60 == 0) {
+            double total = (double)(s_fence_ok + s_fence_fail);
+            double ok_rate = total > 0 ? (100.0 * s_fence_ok / total) : 0;
+            ANLAND_LOG("native fence ok=%llu fail=%llu rate=%.1f%% (finish=%d) [no sync]",
+                       s_fence_ok, s_fence_fail, ok_rate, use_finish);
+        }
         return -1;
     }
 
     int fence_fd = s_pDupFence(egl_display, sync);
     s_pDestroySync(egl_display, sync);
+    if (fence_fd >= 0)
+        s_fence_ok++;
+    else
+        s_fence_fail++;
+    if ((s_fence_ok + s_fence_fail) % 60 == 0) {
+        double total = (double)(s_fence_ok + s_fence_fail);
+        double ok_rate = total > 0 ? (100.0 * s_fence_ok / total) : 0;
+        ANLAND_LOG("native fence ok=%llu fail=%llu rate=%.1f%% (finish=%d)",
+                   s_fence_ok, s_fence_fail, ok_rate, use_finish);
+    }
     return fence_fd;
 }

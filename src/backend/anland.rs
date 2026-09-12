@@ -273,6 +273,7 @@ pub struct Anland {
     heartbeat_timer_token: Option<RegistrationToken>,
     full_damage_frames_remaining: usize,
     was_in_overview: bool,
+    was_in_hot_corner: bool,
 
     // Presentation feedback & frame pacing (VSync synchronization)
     has_pending_frame_callbacks: bool,
@@ -333,6 +334,7 @@ impl Anland {
             heartbeat_timer_token: None,
             full_damage_frames_remaining: 0,
             was_in_overview: false,
+            was_in_hot_corner: false,
             has_pending_frame_callbacks: false,
             pending_feedbacks: std::collections::VecDeque::new(),
             pending_presentation_events: Vec::new(),
@@ -401,6 +403,7 @@ impl Anland {
                 vrr_supported: false,
                 vrr_enabled: false,
                 logical: Some(logical_output(&output)),
+                max_bpc: None,
             },
         );
         drop(ipc);
@@ -510,6 +513,7 @@ impl Anland {
         self.last_overview_per_buffer.clear();
         self.frame_count = 0;
         self.was_in_overview = false;
+        self.was_in_hot_corner = false;
 
         // Dimensions of the buffers the consumer actually allocated this
         // session. They travel consumer->producer over the direct data
@@ -643,7 +647,7 @@ impl Anland {
             smithay::backend::allocator::dmabuf::DmabufFlags::empty(),
         );
 
-        builder.add_plane(owned_fd, 0, info.offset, info.stride);
+        builder.add_plane(owned_fd, info.offset, info.stride);
 
         builder
             .build()
@@ -1153,6 +1157,34 @@ impl Anland {
         }
 
         self.was_in_overview = in_overview;
+
+        // While overview zoom is animating (or gesture in progress) the window
+        // geometry scales every frame — previous swapchain buffers hold stale
+        // positions/sizes. Force full repaint (age 0) and reset damage history
+        // to avoid missing-window flash seen on hot-corner / Mod+O / touchpad
+        // gesture (screenrecord mean 24→56, 1-frame wallpaper-only).
+        if niri.is_overview_animating() {
+            if let Some(o) = &self.output {
+                self.damage_tracker = Some(OutputDamageTracker::from_output(o));
+            }
+            age = 0;
+        }
+
+        // Hot-corner pointer dwell also opens overview instantly; its first
+        // frames have the same stale-buffer geometry as the gesture path.
+        // Burst screencap showed fullscreen hot-corner = 10 spikes>8 vs 0 when
+        // Gboard halves the output, so force a clean sweep on hot-corner entry
+        // (edge-triggered only, otherwise Mod+O with pointer at corner would
+        // reset the tracker every frame and regress).
+        let in_hot_corner = niri.pointer_inside_hot_corner;
+        if in_hot_corner && !self.was_in_hot_corner {
+            if let Some(o) = &self.output {
+                self.damage_tracker = Some(OutputDamageTracker::from_output(o));
+            }
+            age = 0;
+            self.full_damage_frames_remaining = self.dmabufs.len().max(4);
+        }
+        self.was_in_hot_corner = in_hot_corner;
 
         if self.full_damage_frames_remaining > 0 {
             age = 0;

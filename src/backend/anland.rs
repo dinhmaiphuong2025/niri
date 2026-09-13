@@ -273,6 +273,8 @@ pub struct Anland {
     heartbeat_timer_token: Option<RegistrationToken>,
     full_damage_frames_remaining: usize,
     was_in_overview: bool,
+    was_overview_animating: bool,
+    was_general_animating: bool,
     was_in_hot_corner: bool,
     last_mapped_layer_count: usize,
 
@@ -335,6 +337,8 @@ impl Anland {
             heartbeat_timer_token: None,
             full_damage_frames_remaining: 0,
             was_in_overview: false,
+            was_overview_animating: false,
+            was_general_animating: false,
             was_in_hot_corner: false,
             last_mapped_layer_count: 0,
             has_pending_frame_callbacks: false,
@@ -515,6 +519,8 @@ impl Anland {
         self.last_overview_per_buffer.clear();
         self.frame_count = 0;
         self.was_in_overview = false;
+        self.was_overview_animating = false;
+        self.was_general_animating = false;
         self.was_in_hot_corner = false;
         self.last_mapped_layer_count = 0;
 
@@ -770,7 +776,7 @@ impl Anland {
             niri.send_frame_callbacks(&output);
 
             if let Some(output_state) = niri.output_state.get(&output) {
-                if output_state.unfinished_animations_remain {
+                if output_state.unfinished_animations_remain || self.full_damage_frames_remaining > 0 {
                     niri.queue_redraw(&output);
                 }
             }
@@ -1128,20 +1134,65 @@ impl Anland {
 
         let current_ws = niri.layout.active_workspace().map(|ws| ws.id().get());
         let in_overview = niri.is_in_overview();
+        let is_overview_animating = niri.is_overview_animating();
+        let unfinished_animations = niri
+            .output_state
+            .get(output)
+            .map(|s| s.unfinished_animations_remain)
+            .unwrap_or(false);
+        let is_animating = is_overview_animating || unfinished_animations;
+
+        // Clean sweep triggers:
+        // 1. Overview opened or closed.
+        // 2. Overview zoom/gesture animation ended.
+        // 3. General animation (window open/close, workspace switch, tab change) ended.
+        // 4. Layer-shell surface count changed (Noctalia launcher, widget bar popup, toast).
+        let overview_transition = self.was_in_overview != in_overview;
+        let overview_anim_ended = self.was_overview_animating && !is_overview_animating;
+        let general_anim_ended = self.was_general_animating && !unfinished_animations;
+
+        let current_layer_count = niri.mapped_layer_surfaces.len();
+        let layer_count_changed = current_layer_count != self.last_mapped_layer_count;
+
+        let in_hot_corner = niri.pointer_inside_hot_corner;
+        let hot_corner_entered = in_hot_corner && !self.was_in_hot_corner;
+
+        if overview_transition
+            || overview_anim_ended
+            || general_anim_ended
+            || layer_count_changed
+            || hot_corner_entered
+        {
+            if let Some(o) = &self.output {
+                self.damage_tracker = Some(OutputDamageTracker::from_output(o));
+            }
+            self.full_damage_frames_remaining = self.dmabufs.len().max(4);
+            self.last_frame_per_buffer.fill(-1);
+        }
+
+        self.was_in_overview = in_overview;
+        self.was_overview_animating = is_overview_animating;
+        self.was_general_animating = unfinished_animations;
+        self.last_mapped_layer_count = current_layer_count;
+        self.was_in_hot_corner = in_hot_corner;
 
         // Check if the dequeued buffer still contains pixels from the current
-        // workspace and overview mode. If it was last rendered on a different
-        // workspace or in a different overview state, its background and windows
-        // are from another workspace/mode -> force full repaint (age = 0).
-        let buffer_valid = self.last_workspace_per_buffer.get(idx as usize)
+        // workspace and overview mode.
+        let buffer_valid = self
+            .last_workspace_per_buffer
+            .get(idx as usize)
             .copied()
-            .flatten() == current_ws
-            && self.last_overview_per_buffer.get(idx as usize)
-            .copied()
-            .flatten() == Some(in_overview);
+            .flatten()
+            == current_ws
+            && self
+                .last_overview_per_buffer
+                .get(idx as usize)
+                .copied()
+                .flatten()
+                == Some(in_overview);
 
         let last = self.last_frame_per_buffer[idx as usize];
-        let mut age = if buffer_valid && last >= 0 {
+        let mut age = if buffer_valid && last >= 0 && !is_animating {
             let calculated_age = (self.frame_count - last as u64) as usize;
             if calculated_age >= 1 && calculated_age <= 4 {
                 calculated_age
@@ -1152,75 +1203,8 @@ impl Anland {
             0
         };
 
-        // When overview completes an open/close transition, trigger a clean sweep
-        // across all buffers in the swapchain pool so every DMABUF receives the
-        // new stationary layout before reverting to partial damage rendering.
-        if self.was_in_overview != in_overview {
-            self.full_damage_frames_remaining = self.dmabufs.len().max(4);
-        }
-
-        self.was_in_overview = in_overview;
-
-        // While overview zoom is animating (or gesture in progress) the window
-        // geometry scales every frame — previous swapchain buffers hold stale
-        // positions/sizes. Force full repaint (age 0) and reset damage history
-        // to avoid missing-window flash seen on hot-corner / Mod+O / touchpad
-        // gesture (screenrecord mean 24→56, 1-frame wallpaper-only).
-        if niri.is_overview_animating() {
-            if let Some(o) = &self.output {
-                self.damage_tracker = Some(OutputDamageTracker::from_output(o));
-            }
-            age = 0;
-        }
-
-        // Hot-corner pointer dwell also opens overview instantly; its first
-        // frames have the same stale-buffer geometry as the gesture path.
-        // Burst screencap showed fullscreen hot-corner = 10 spikes>8 vs 0 when
-        // Gboard halves the output, so force a clean sweep on hot-corner entry
-        // (edge-triggered only, otherwise Mod+O with pointer at corner would
-        // reset the tracker every frame and regress).
-        let in_hot_corner = niri.pointer_inside_hot_corner;
-        if in_hot_corner && !self.was_in_hot_corner {
-            if let Some(o) = &self.output {
-                self.damage_tracker = Some(OutputDamageTracker::from_output(o));
-            }
-            age = 0;
-            self.full_damage_frames_remaining = self.dmabufs.len().max(4);
-        }
-        self.was_in_hot_corner = in_hot_corner;
-
-        // Runtime test knob: ANLAND_LAYER_SWEEP=1
-        // Trigger 4-buffer clean sweep when layer-shell surface count changes
-        // (Noctalia launcher/settings/toast mapped or unmapped).
-        let current_layer_count = niri.mapped_layer_surfaces.len();
-        if std::env::var_os("ANLAND_LAYER_SWEEP").map_or(false, |v| v == "1")
-            && current_layer_count != self.last_mapped_layer_count
-        {
-            if let Some(o) = &self.output {
-                self.damage_tracker = Some(OutputDamageTracker::from_output(o));
-            }
-            age = 0;
-            self.full_damage_frames_remaining = self.dmabufs.len().max(4);
-        }
-        self.last_mapped_layer_count = current_layer_count;
-
-        // Runtime test knob: ANLAND_ANIM_FULL_DAMAGE=1
-        // Force full repaint (age=0) while ANY animation remains unfinished
-        // (workspace slide, window open/close, shell launcher transitions).
-        if std::env::var_os("ANLAND_ANIM_FULL_DAMAGE").map_or(false, |v| v == "1") {
-            let output_state = niri.output_state.get(output).unwrap();
-            if output_state.unfinished_animations_remain {
-                if let Some(o) = &self.output {
-                    self.damage_tracker = Some(OutputDamageTracker::from_output(o));
-                }
-                age = 0;
-            }
-        }
-
-        // Runtime test knob: ANLAND_FORCE_FULL_DAMAGE=1
-        // Unconditionally force age=0 every frame to definitively test whether
-        // partial damage / Adreno FBO scissor GMEM load is the flicker root cause.
-        if std::env::var_os("ANLAND_FORCE_FULL_DAMAGE").map_or(false, |v| v == "1") {
+        // While any animation is running, force full repaint (age = 0) without resetting tracker history every frame
+        if is_animating {
             age = 0;
         }
 
@@ -1290,8 +1274,14 @@ impl Anland {
             return RenderResult::NoDamage;
         }
 
-        // Only advance the buffer-bank age accounting on a frame with actual damage!
-        self.last_frame_per_buffer[idx as usize] = self.frame_count as i64;
+        // Only advance buffer history if this frame was NOT rendered during an active animation.
+        // Buffers rendered during animations hold transient geometries and must never serve
+        // as baseline for partial damage later.
+        if is_animating {
+            self.last_frame_per_buffer[idx as usize] = -1;
+        } else {
+            self.last_frame_per_buffer[idx as usize] = self.frame_count as i64;
+        }
         self.frame_count = self.frame_count.wrapping_add(1);
         if (idx as usize) < self.last_workspace_per_buffer.len() {
             self.last_workspace_per_buffer[idx as usize] = current_ws;
@@ -1360,6 +1350,13 @@ impl Anland {
 
         // Signal the consumer ONLY when we actually rendered something.
         self.ctx.trigger_refresh();
+
+        // If there are still clean-sweep frames remaining in the transition pipeline,
+        // immediately queue another redraw so all buffers in the swapchain pool are
+        // repainted with the new stationary layout within consecutive VSync intervals.
+        if self.full_damage_frames_remaining > 0 {
+            niri.queue_redraw(output);
+        }
 
         RenderResult::Submitted
     }

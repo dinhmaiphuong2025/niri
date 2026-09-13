@@ -4340,7 +4340,9 @@ impl Niri {
 
         // Don't draw the focus ring on the workspaces while interactively moving above those
         // workspaces, since the interactively-moved window already has a focus ring.
-        let focus_ring = !self.layout.interactive_move_is_moving_above_output(output);
+        // Also don't draw the focus ring in overview to prevent thumbnail border flicker.
+        let focus_ring = !self.layout.interactive_move_is_moving_above_output(output)
+            && !self.is_in_overview();
 
         // Get monitor elements.
         let mon = self.layout.monitor_for_output(output).unwrap();
@@ -4451,36 +4453,34 @@ impl Niri {
                 }};
             }
 
-            for (ws, geo) in mon.workspaces_with_render_geo() {
-                let ns = Some(ws.id().get() as usize);
-                let xray_pos = XrayPos::new(geo.loc, zoom);
-                push_popups_from_layer!(Layer::Bottom, ns, xray_pos, process!(geo, ns));
-                push_popups_from_layer!(Layer::Background, ns, xray_pos, process!(geo, ns));
+            let in_overview = self.is_in_overview();
+
+            if !in_overview {
+                for (ws, geo) in mon.workspaces_with_render_geo() {
+                    let ns = Some(ws.id().get() as usize);
+                    let xray_pos = XrayPos::new(geo.loc, zoom);
+                    push_popups_from_layer!(Layer::Bottom, ns, xray_pos, process!(geo, ns));
+                    push_popups_from_layer!(Layer::Background, ns, xray_pos, process!(geo, ns));
+                }
             }
 
             mon.render_workspaces(ctx.r(), focus_ring, &mut |elem| push(elem.into()));
 
-            for (ws, geo) in mon.workspaces_with_render_geo() {
-                // The render element namespace. This will be set to the workspace index for
-                // elements duplicated across workspaces (i.e. background and bottom layers) in
-                // order to have their non-xray framebuffer effects separated from each other.
-                //
-                // This doesn't have to correspond exactly to workspace id or idx, the only
-                // requirement is that there's only one framebuffer effect element with a given id +
-                // namespace on the frame at once. Id + namespace is used as the cache key in the
-                // damage tracker.
-                let ns = Some(ws.id().get() as usize);
-                let xray_pos = XrayPos::new(geo.loc, zoom);
-                push_normal_from_layer!(Layer::Bottom, ns, xray_pos, process!(geo, ns));
-                push_normal_from_layer!(Layer::Background, ns, xray_pos, process!(geo, ns));
+            if !in_overview {
+                for (ws, geo) in mon.workspaces_with_render_geo() {
+                    let ns = Some(ws.id().get() as usize);
+                    let xray_pos = XrayPos::new(geo.loc, zoom);
+                    push_normal_from_layer!(Layer::Bottom, ns, xray_pos, process!(geo, ns));
+                    push_normal_from_layer!(Layer::Background, ns, xray_pos, process!(geo, ns));
 
-                let mut ws_bg_push = |elem| {
-                    let elem = crate::render_helpers::namespaced::NamespacedRenderElement::new(elem, ns.unwrap());
-                    if let Some(elem) = scale_relocate_crop(elem, output_scale, zoom, geo) {
-                        push(elem.into());
-                    }
-                };
-                ws_bg_push(ws.render_background());
+                    let mut ws_bg_push = |elem| {
+                        let elem = crate::render_helpers::namespaced::NamespacedRenderElement::new(elem, ns.unwrap());
+                        if let Some(elem) = scale_relocate_crop(elem, output_scale, zoom, geo) {
+                            push(elem.into());
+                        }
+                    };
+                    ws_bg_push(ws.render_background());
+                }
             }
         }
 

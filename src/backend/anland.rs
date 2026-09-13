@@ -276,7 +276,6 @@ pub struct Anland {
     was_overview_animating: bool,
     was_general_animating: bool,
     was_in_hot_corner: bool,
-    last_mapped_layer_count: usize,
 
     // Presentation feedback & frame pacing (VSync synchronization)
     has_pending_frame_callbacks: bool,
@@ -340,7 +339,6 @@ impl Anland {
             was_overview_animating: false,
             was_general_animating: false,
             was_in_hot_corner: false,
-            last_mapped_layer_count: 0,
             has_pending_frame_callbacks: false,
             pending_feedbacks: std::collections::VecDeque::new(),
             pending_presentation_events: Vec::new(),
@@ -522,7 +520,6 @@ impl Anland {
         self.was_overview_animating = false;
         self.was_general_animating = false;
         self.was_in_hot_corner = false;
-        self.last_mapped_layer_count = 0;
 
         // Dimensions of the buffers the consumer actually allocated this
         // session. They travel consumer->producer over the direct data
@@ -1146,13 +1143,9 @@ impl Anland {
         // 1. Overview opened or closed.
         // 2. Overview zoom/gesture animation ended.
         // 3. General animation (window open/close, workspace switch, tab change) ended.
-        // 4. Layer-shell surface count changed (Noctalia launcher, widget bar popup, toast).
         let overview_transition = self.was_in_overview != in_overview;
         let overview_anim_ended = self.was_overview_animating && !is_overview_animating;
         let general_anim_ended = self.was_general_animating && !unfinished_animations;
-
-        let current_layer_count = niri.mapped_layer_surfaces.len();
-        let layer_count_changed = current_layer_count != self.last_mapped_layer_count;
 
         let in_hot_corner = niri.pointer_inside_hot_corner;
         let hot_corner_entered = in_hot_corner && !self.was_in_hot_corner;
@@ -1160,7 +1153,6 @@ impl Anland {
         if overview_transition
             || overview_anim_ended
             || general_anim_ended
-            || layer_count_changed
             || hot_corner_entered
         {
             if let Some(o) = &self.output {
@@ -1173,7 +1165,6 @@ impl Anland {
         self.was_in_overview = in_overview;
         self.was_overview_animating = is_overview_animating;
         self.was_general_animating = unfinished_animations;
-        self.last_mapped_layer_count = current_layer_count;
         self.was_in_hot_corner = in_hot_corner;
 
         // Check if the dequeued buffer still contains pixels from the current

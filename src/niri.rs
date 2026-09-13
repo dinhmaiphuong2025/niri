@@ -4412,7 +4412,8 @@ impl Niri {
 
         // When rendering above the top layer, we put the regular monitor elements first.
         // Otherwise, we will render all layer-shell pop-ups and the top layer on top.
-        if mon.render_above_top_layer() {
+        // In overview, we always render all layer-shell pop-ups and the top layer on top.
+        if mon.render_above_top_layer() && !self.is_in_overview() {
             self.layout
                 .render_interactive_move_for_output(ctx.r(), output, &mut |elem| push(elem.into()));
 

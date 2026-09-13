@@ -1245,7 +1245,7 @@ impl Anland {
                 age,
                 buffer_valid,
                 in_overview,
-                current_layer_count,
+                niri.mapped_layer_surfaces.len(),
                 current_ws,
                 res.damage,
             );

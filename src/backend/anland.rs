@@ -274,6 +274,7 @@ pub struct Anland {
     full_damage_frames_remaining: usize,
     was_in_overview: bool,
     was_in_hot_corner: bool,
+    last_mapped_layer_count: usize,
 
     // Presentation feedback & frame pacing (VSync synchronization)
     has_pending_frame_callbacks: bool,
@@ -335,6 +336,7 @@ impl Anland {
             full_damage_frames_remaining: 0,
             was_in_overview: false,
             was_in_hot_corner: false,
+            last_mapped_layer_count: 0,
             has_pending_frame_callbacks: false,
             pending_feedbacks: std::collections::VecDeque::new(),
             pending_presentation_events: Vec::new(),
@@ -514,6 +516,7 @@ impl Anland {
         self.frame_count = 0;
         self.was_in_overview = false;
         self.was_in_hot_corner = false;
+        self.last_mapped_layer_count = 0;
 
         // Dimensions of the buffers the consumer actually allocated this
         // session. They travel consumer->producer over the direct data
@@ -1186,6 +1189,41 @@ impl Anland {
         }
         self.was_in_hot_corner = in_hot_corner;
 
+        // Runtime test knob: ANLAND_LAYER_SWEEP=1
+        // Trigger 4-buffer clean sweep when layer-shell surface count changes
+        // (Noctalia launcher/settings/toast mapped or unmapped).
+        let current_layer_count = niri.mapped_layer_surfaces.len();
+        if std::env::var_os("ANLAND_LAYER_SWEEP").map_or(false, |v| v == "1")
+            && current_layer_count != self.last_mapped_layer_count
+        {
+            if let Some(o) = &self.output {
+                self.damage_tracker = Some(OutputDamageTracker::from_output(o));
+            }
+            age = 0;
+            self.full_damage_frames_remaining = self.dmabufs.len().max(4);
+        }
+        self.last_mapped_layer_count = current_layer_count;
+
+        // Runtime test knob: ANLAND_ANIM_FULL_DAMAGE=1
+        // Force full repaint (age=0) while ANY animation remains unfinished
+        // (workspace slide, window open/close, shell launcher transitions).
+        if std::env::var_os("ANLAND_ANIM_FULL_DAMAGE").map_or(false, |v| v == "1") {
+            let output_state = niri.output_state.get(output).unwrap();
+            if output_state.unfinished_animations_remain {
+                if let Some(o) = &self.output {
+                    self.damage_tracker = Some(OutputDamageTracker::from_output(o));
+                }
+                age = 0;
+            }
+        }
+
+        // Runtime test knob: ANLAND_FORCE_FULL_DAMAGE=1
+        // Unconditionally force age=0 every frame to definitively test whether
+        // partial damage / Adreno FBO scissor GMEM load is the flicker root cause.
+        if std::env::var_os("ANLAND_FORCE_FULL_DAMAGE").map_or(false, |v| v == "1") {
+            age = 0;
+        }
+
         if self.full_damage_frames_remaining > 0 {
             age = 0;
             self.full_damage_frames_remaining -= 1;
@@ -1221,6 +1259,22 @@ impl Anland {
             }
         };
         drop(target);
+
+        // Runtime test knob: ANLAND_DAMAGE_DEBUG=1
+        // Per-frame trace log to inspect damage state when reproducing flickers.
+        if std::env::var_os("ANLAND_DAMAGE_DEBUG").map_or(false, |v| v == "1") {
+            info!(
+                "trace frame={} idx={} age={} valid={} overview={} layers={} ws={:?} damage={:?}",
+                self.frame_count,
+                idx,
+                age,
+                buffer_valid,
+                in_overview,
+                current_layer_count,
+                current_ws,
+                res.damage,
+            );
+        }
 
         // If nothing changed on screen, skip frame-callback dispatch,
         // presentation feedback, and GPU sync entirely to avoid wasting cycles.

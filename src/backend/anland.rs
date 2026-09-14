@@ -276,6 +276,7 @@ pub struct Anland {
     was_overview_animating: bool,
     was_general_animating: bool,
     was_in_hot_corner: bool,
+    last_mapped_layer_count: usize,
 
     // Presentation feedback & frame pacing (VSync synchronization)
     has_pending_frame_callbacks: bool,
@@ -339,6 +340,7 @@ impl Anland {
             was_overview_animating: false,
             was_general_animating: false,
             was_in_hot_corner: false,
+            last_mapped_layer_count: 0,
             has_pending_frame_callbacks: false,
             pending_feedbacks: std::collections::VecDeque::new(),
             pending_presentation_events: Vec::new(),
@@ -520,6 +522,7 @@ impl Anland {
         self.was_overview_animating = false;
         self.was_general_animating = false;
         self.was_in_hot_corner = false;
+        self.last_mapped_layer_count = 0;
 
         // Dimensions of the buffers the consumer actually allocated this
         // session. They travel consumer->producer over the direct data
@@ -1143,6 +1146,7 @@ impl Anland {
         // 1. Overview opened or closed.
         // 2. Overview zoom/gesture animation ended.
         // 3. General animation (window open/close, workspace switch, tab change) ended.
+        // 4. Layer-shell surface count changed (widget open/close, panel attach/detach).
         let overview_transition = self.was_in_overview != in_overview;
         let overview_anim_ended = self.was_overview_animating && !is_overview_animating;
         let general_anim_ended = self.was_general_animating && !unfinished_animations;
@@ -1150,22 +1154,23 @@ impl Anland {
         let in_hot_corner = niri.pointer_inside_hot_corner;
         let hot_corner_entered = in_hot_corner && !self.was_in_hot_corner;
 
+        let current_layer_count = niri.mapped_layer_surfaces.len();
+        let layer_count_changed = current_layer_count != self.last_mapped_layer_count;
+
         if overview_transition
             || overview_anim_ended
             || general_anim_ended
             || hot_corner_entered
+            || layer_count_changed
         {
-            if let Some(o) = &self.output {
-                self.damage_tracker = Some(OutputDamageTracker::from_output(o));
-            }
             self.full_damage_frames_remaining = self.dmabufs.len().max(4);
-            self.last_frame_per_buffer.fill(-1);
         }
 
         self.was_in_overview = in_overview;
         self.was_overview_animating = is_overview_animating;
         self.was_general_animating = unfinished_animations;
         self.was_in_hot_corner = in_hot_corner;
+        self.last_mapped_layer_count = current_layer_count;
 
         // Check if the dequeued buffer still contains pixels from the current
         // workspace and overview mode.
@@ -1341,13 +1346,6 @@ impl Anland {
 
         // Signal the consumer ONLY when we actually rendered something.
         self.ctx.trigger_refresh();
-
-        // If there are still clean-sweep frames remaining in the transition pipeline,
-        // immediately queue another redraw so all buffers in the swapchain pool are
-        // repainted with the new stationary layout within consecutive VSync intervals.
-        if self.full_damage_frames_remaining > 0 {
-            niri.queue_redraw(output);
-        }
 
         RenderResult::Submitted
     }
